@@ -26,6 +26,8 @@ Or as an MCP server in Claude Desktop or other MCP clients:
 import os
 import sys
 
+from browser_use.llm import ChatAWSBedrock
+
 # Set environment variables BEFORE any browser_use imports to prevent early logging
 os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
 os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
@@ -36,8 +38,6 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
-
-from browser_use.llm import ChatAWSBedrock
 
 # Configure logging for MCP mode - redirect to stderr but preserve critical diagnostics
 logging.basicConfig(
@@ -149,6 +149,7 @@ except ImportError:
 	logger.error('MCP SDK not installed. Install with: pip install mcp')
 	sys.exit(1)
 
+from browser_use.browser.events import UploadFileEvent
 from browser_use.telemetry import MCPServerTelemetryEvent, ProductTelemetry
 from browser_use.utils import create_task_with_error_handling, get_browser_use_version
 
@@ -313,6 +314,24 @@ class BrowserUseServer:
 					name='browser_go_back',
 					description='Go back to the previous page',
 					inputSchema={'type': 'object', 'properties': {}},
+				),
+				types.Tool(
+					name='browser_upload_file',
+					description='Upload a file to a file input element on the page. Click the upload button/area first to identify it, then use this tool with the element index and absolute file path.',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'index': {
+								'type': 'integer',
+								'description': 'The index of the file upload element or nearby button (from browser_get_state)',
+							},
+							'path': {
+								'type': 'string',
+								'description': 'Absolute path to the file to upload',
+							},
+						},
+						'required': ['index', 'path'],
+					},
 				),
 				# Tab management
 				types.Tool(
@@ -490,6 +509,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_go_back':
 				return await self._go_back()
+
+			elif tool_name == 'browser_upload_file':
+				return await self._upload_file(arguments['index'], arguments['path'])
 
 			elif tool_name == 'browser_close':
 				return await self._close_browser()
@@ -891,6 +913,79 @@ class BrowserUseServer:
 		event = self.browser_session.event_bus.dispatch(GoBackEvent())
 		await event
 		return 'Navigated back'
+
+	async def _upload_file(self, index: int, path: str) -> str:
+		"""Upload a file to a file input element."""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		if not os.path.exists(path):
+			return f'Error: File {path} does not exist'
+		if os.path.getsize(path) == 0:
+			return f'Error: File {path} is empty'
+
+		selector_map = await self.browser_session.get_selector_map()
+		if index not in selector_map:
+			return f'Error: Element with index {index} does not exist'
+
+		node = selector_map[index]
+
+		def find_file_input(n, depth=3):
+			if depth < 0:
+				return None
+			if self.browser_session.is_file_input(n):
+				return n
+			for child in (n.children_nodes or []):
+				result = find_file_input(child, depth - 1)
+				if result:
+					return result
+			return None
+
+		file_input_node = None
+		current = node
+		for _ in range(4):
+			if self.browser_session.is_file_input(current):
+				file_input_node = current
+				break
+			result = find_file_input(current, 3)
+			if result:
+				file_input_node = result
+				break
+			if current.parent_node:
+				for sibling in (current.parent_node.children_nodes or []):
+					if sibling is current:
+						continue
+					if self.browser_session.is_file_input(sibling):
+						file_input_node = sibling
+						break
+					result = find_file_input(sibling, 3)
+					if result:
+						file_input_node = result
+						break
+				if file_input_node:
+					break
+			current = current.parent_node
+			if not current:
+				break
+
+		if not file_input_node:
+			for idx, element in selector_map.items():
+				if self.browser_session.is_file_input(element):
+					file_input_node = element
+					break
+
+		if not file_input_node:
+			return 'Error: No file upload element found on the page'
+
+		try:
+			event = self.browser_session.event_bus.dispatch(
+				UploadFileEvent(node=file_input_node, file_path=path)
+			)
+			await event
+			await event.event_result(raise_if_any=True, raise_if_none=False)
+			return f'Successfully uploaded file {os.path.basename(path)} to element {index}'
+		except Exception as e:
+			return f'Error uploading file: {str(e)}'
 
 	async def _close_browser(self) -> str:
 		"""Close the browser session."""
