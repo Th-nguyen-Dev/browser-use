@@ -149,7 +149,7 @@ except ImportError:
 	logger.error('MCP SDK not installed. Install with: pip install mcp')
 	sys.exit(1)
 
-from browser_use.browser.events import UploadFileEvent
+from browser_use.browser.events import SendKeysEvent, UploadFileEvent
 from browser_use.telemetry import MCPServerTelemetryEvent, ProductTelemetry
 from browser_use.utils import create_task_with_error_handling, get_browser_use_version
 
@@ -333,6 +333,21 @@ class BrowserUseServer:
 						'required': ['index', 'path'],
 					},
 				),
+				types.Tool(
+					name='browser_clear_and_type',
+					description='Clear an input field completely, then type new text. Use this instead of browser_type when the field may already have a value. This selects all existing text (Ctrl+A) and replaces it.',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'index': {
+								'type': 'integer',
+								'description': 'The index of the input element (from browser_get_state)',
+							},
+							'text': {'type': 'string', 'description': 'The text to type after clearing'},
+						},
+						'required': ['index', 'text'],
+					},
+				),
 				# Tab management
 				types.Tool(
 					name='browser_list_tabs', description='List all open tabs', inputSchema={'type': 'object', 'properties': {}}
@@ -497,6 +512,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_type':
 				return await self._type_text(arguments['index'], arguments['text'])
+
+			elif tool_name == 'browser_clear_and_type':
+				return await self._clear_and_type(arguments['index'], arguments['text'])
 
 			elif tool_name == 'browser_get_state':
 				return await self._get_browser_state(arguments.get('include_screenshot', False))
@@ -812,31 +830,88 @@ class BrowserUseServer:
 		else:
 			return f"Typed '{text}' into element {index}"
 
+	async def _clear_and_type(self, index: int, text: str) -> str:
+		"""Clear an input field and type new text. Uses Ctrl+A to select all, then types to replace."""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		element = await self.browser_session.get_dom_element_by_index(index)
+		if not element:
+			return f'Element with index {index} not found'
+
+		import asyncio as _asyncio
+		from browser_use.browser.events import ClickElementEvent, SendKeysEvent, TypeTextEvent
+
+		# Step 1: Click to focus the element
+		click_event = self.browser_session.event_bus.dispatch(ClickElementEvent(node=element))
+		await click_event
+		await _asyncio.sleep(0.1)
+
+		# Step 2: Select all existing text
+		select_event = self.browser_session.event_bus.dispatch(SendKeysEvent(keys='ctrl+a'))
+		await select_event
+		await _asyncio.sleep(0.1)
+
+		# Step 3: Type new text (replaces the selection)
+		type_event = self.browser_session.event_bus.dispatch(
+			TypeTextEvent(node=element, text=text)
+		)
+		await type_event
+
+		return f"Cleared and typed '{text}' into element {index}"
+
 	async def _get_browser_state(self, include_screenshot: bool = False) -> str:
-		"""Get current browser state."""
+		"""Get current browser state with rich element data."""
 		if not self.browser_session:
 			return 'Error: No browser session active'
 
 		state = await self.browser_session.get_browser_state_summary()
 
-		result = {
+		result: dict[str, Any] = {
 			'url': state.url,
 			'title': state.title,
 			'tabs': [{'url': tab.url, 'title': tab.title} for tab in state.tabs],
 			'interactive_elements': [],
 		}
 
-		# Add interactive elements with their indices
+		# Page-level info
+		if state.page_info:
+			result['page_info'] = {
+				'scroll_x': state.page_info.scroll_x,
+				'scroll_y': state.page_info.scroll_y,
+				'viewport_height': state.page_info.viewport_height,
+				'pixels_above': state.page_info.pixels_above,
+				'pixels_below': state.page_info.pixels_below,
+			}
+
+		if state.browser_errors:
+			result['browser_errors'] = state.browser_errors
+
+		# Add interactive elements with rich data
 		for index, element in state.dom_state.selector_map.items():
-			elem_info = {
+			elem_info: dict[str, Any] = {
 				'index': index,
 				'tag': element.tag_name,
 				'text': element.get_all_children_text(max_depth=2)[:100],
 			}
-			if element.attributes.get('placeholder'):
-				elem_info['placeholder'] = element.attributes['placeholder']
-			if element.attributes.get('href'):
-				elem_info['href'] = element.attributes['href']
+
+			# Accessible name (label) from accessibility tree — this is the field label
+			if element.ax_node and element.ax_node.name:
+				elem_info['label'] = element.ax_node.name
+			# ARIA role — distinguishes textbox, combobox, listbox, checkbox, etc.
+			if element.ax_node and element.ax_node.role:
+				elem_info['role'] = element.ax_node.role
+
+			# Key attributes from the DOM element
+			attrs = element.attributes
+			for attr_name in ('type', 'value', 'name', 'placeholder', 'href',
+							  'aria-label', 'required', 'disabled', 'checked',
+							  'aria-expanded', 'haspopup', 'invalid', 'accept',
+							  'multiple', 'aria-autocomplete', 'autocomplete'):
+				val = attrs.get(attr_name)
+				if val is not None and val != '':
+					elem_info[attr_name] = val
+
 			result['interactive_elements'].append(elem_info)
 
 		if include_screenshot and state.screenshot:
