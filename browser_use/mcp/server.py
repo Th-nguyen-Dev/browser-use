@@ -1032,13 +1032,16 @@ class BrowserUseServer:
 			await type_event
 			await _asyncio.sleep(0.5)  # Wait for dropdown to render
 
-			# Step 3: Get fresh DOM state to find dropdown options
+			# Step 3: Rebuild DOM to get fresh state including dropdown options
+			# get_selector_map() returns cached data — we need get_browser_state_summary()
+			# to force a full DOM rebuild that captures the newly-rendered dropdown
 			search_lower = text.lower()
 			best_option = None
 			best_is_exact = False
 
 			# Try up to 3 times with increasing wait to find options
 			for attempt in range(3):
+				await self.browser_session.get_browser_state_summary()
 				selector_map = await self.browser_session.get_selector_map()
 
 				for idx, node in selector_map.items():
