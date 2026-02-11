@@ -1014,6 +1014,7 @@ class BrowserUseServer:
 
 		import asyncio as _asyncio
 		from browser_use.browser.events import ClickElementEvent, SendKeysEvent, TypeTextEvent
+		from browser_use.dom.views import NodeType
 
 		try:
 			# Step 1: Click to focus the combobox input
@@ -1052,17 +1053,16 @@ class BrowserUseServer:
 					if role != 'option':
 						continue
 
-					# Get the option's visible text
-					option_text = ''
-					if node.text:
-						option_text = node.text.strip()
-					elif node.children_nodes:
-						# Collect text from child nodes
-						texts = []
-						for child in node.children_nodes:
-							if child.text:
-								texts.append(child.text.strip())
-						option_text = ' '.join(texts)
+					# Get the option's visible text by collecting TEXT_NODE children
+					def _collect_text(n):
+						parts = []
+						if n.node_type == NodeType.TEXT_NODE and n.node_value:
+							parts.append(n.node_value.strip())
+						for child in (n.children_nodes or []):
+							parts.extend(_collect_text(child))
+						return parts
+
+					option_text = ' '.join(_collect_text(node)).strip()
 
 					if not option_text:
 						continue
