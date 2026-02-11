@@ -316,6 +316,20 @@ class BrowserUseServer:
 					inputSchema={'type': 'object', 'properties': {}},
 				),
 				types.Tool(
+					name='browser_get_text',
+					description='Get all visible text on the current page. Returns the full text content including headings, labels, paragraphs, error messages, and instructions. No AI/LLM required. Useful for reading form labels, validation errors, and page content that browser_get_state does not show.',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'max_length': {
+								'type': 'integer',
+								'description': 'Maximum characters to return (default 5000). Use a smaller value for quick checks.',
+								'default': 5000,
+							}
+						},
+					},
+				),
+				types.Tool(
 					name='browser_upload_file',
 					description='Upload a file to a file input element on the page. Click the upload button/area first to identify it, then use this tool with the element index and absolute file path.',
 					inputSchema={
@@ -521,6 +535,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_extract_content':
 				return await self._extract_content(arguments['query'], arguments.get('extract_links', False))
+
+			elif tool_name == 'browser_get_text':
+				return await self._get_page_text(arguments.get('max_length', 5000))
 
 			elif tool_name == 'browser_scroll':
 				return await self._scroll(arguments.get('direction', 'down'))
@@ -918,6 +935,29 @@ class BrowserUseServer:
 			result['screenshot'] = state.screenshot
 
 		return json.dumps(result, indent=2)
+
+	async def _get_page_text(self, max_length: int = 5000) -> str:
+		"""Get all visible text from the current page via CDP. No LLM required."""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		try:
+			cdp_session = await self.browser_session.get_active_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				expression='document.body.innerText',
+				returnByValue=True,
+			)
+			text = result.get('result', {}).get('value', '')
+			if not text:
+				return 'No visible text found on page'
+			# Collapse excessive whitespace
+			import re
+			text = re.sub(r'\n{3,}', '\n\n', text)
+			if len(text) > max_length:
+				text = text[:max_length] + f'\n\n... (truncated at {max_length} chars, {len(text)} total)'
+			return text
+		except Exception as e:
+			return f'Error getting page text: {str(e)}'
 
 	async def _extract_content(self, query: str, extract_links: bool = False) -> str:
 		"""Extract content from current page."""
