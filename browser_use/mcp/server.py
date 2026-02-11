@@ -267,7 +267,7 @@ class BrowserUseServer:
 				),
 				types.Tool(
 					name='browser_get_state',
-					description='Get the current state of the page including all interactive elements',
+					description='Get the current state of the page including all interactive elements. Returns a hierarchical DOM tree showing page structure, text content, and interactive elements marked with [id] numbers. Use these [id] numbers with browser_click, browser_type, and browser_clear_and_type. Also shows element attributes like type, value, placeholder, role, checked, required. Includes headings, labels, error messages, and form structure for context.',
 					inputSchema={
 						'type': 'object',
 						'properties': {
@@ -878,63 +878,57 @@ class BrowserUseServer:
 		return f"Cleared and typed '{text}' into element {index}"
 
 	async def _get_browser_state(self, include_screenshot: bool = False) -> str:
-		"""Get current browser state with rich element data."""
+		"""Get current browser state using browser-use's built-in DOM tree serializer.
+
+		Returns the same structured DOM tree that browser-use's own AI agent sees:
+		- Hierarchical indented tree showing page structure
+		- Interactive elements marked with [backendNodeId] — use these IDs with browser_click/browser_type/browser_clear_and_type
+		- Element attributes (type, value, placeholder, role, checked, required, etc.)
+		- Visible text content (headings, labels, paragraphs, error messages)
+		- Scroll info for scrollable containers
+		- Shadow DOM markers
+
+		Example output:
+		  [42]<input type=text value=Sebastian placeholder=First name />
+		  [43]<input type=text placeholder=Last name />
+		  Submit Application
+		  [44]<button />
+		"""
 		if not self.browser_session:
 			return 'Error: No browser session active'
 
 		state = await self.browser_session.get_browser_state_summary()
 
-		result: dict[str, Any] = {
-			'url': state.url,
-			'title': state.title,
-			'tabs': [{'url': tab.url, 'title': tab.title} for tab in state.tabs],
-			'interactive_elements': [],
-		}
+		# Build header with page metadata
+		parts: list[str] = []
+		parts.append(f'url: {state.url}')
+		parts.append(f'title: {state.title}')
 
-		# Page-level info
+		if len(state.tabs) > 1:
+			tabs_str = ', '.join(f'{tab.title} ({tab.url})' for tab in state.tabs)
+			parts.append(f'tabs: {tabs_str}')
+
 		if state.page_info:
-			result['page_info'] = {
-				'scroll_x': state.page_info.scroll_x,
-				'scroll_y': state.page_info.scroll_y,
-				'viewport_height': state.page_info.viewport_height,
-				'pixels_above': state.page_info.pixels_above,
-				'pixels_below': state.page_info.pixels_below,
-			}
+			parts.append(
+				f'scroll: y={state.page_info.scroll_y}, '
+				f'viewport={state.page_info.viewport_height}px, '
+				f'{state.page_info.pixels_above}px above, '
+				f'{state.page_info.pixels_below}px below'
+			)
 
 		if state.browser_errors:
-			result['browser_errors'] = state.browser_errors
+			parts.append(f'browser_errors: {state.browser_errors}')
 
-		# Add interactive elements with rich data
-		for index, element in state.dom_state.selector_map.items():
-			elem_info: dict[str, Any] = {
-				'index': index,
-				'tag': element.tag_name,
-				'text': element.get_all_children_text(max_depth=2)[:100],
-			}
+		parts.append('')  # blank line before tree
 
-			# Accessible name (label) from accessibility tree — this is the field label
-			if element.ax_node and element.ax_node.name:
-				elem_info['label'] = element.ax_node.name
-			# ARIA role — distinguishes textbox, combobox, listbox, checkbox, etc.
-			if element.ax_node and element.ax_node.role:
-				elem_info['role'] = element.ax_node.role
-
-			# Key attributes from the DOM element
-			attrs = element.attributes
-			for attr_name in ('type', 'value', 'name', 'placeholder', 'href',
-							  'aria-label', 'required', 'disabled', 'checked',
-							  'aria-expanded', 'haspopup', 'invalid', 'accept',
-							  'multiple', 'aria-autocomplete', 'autocomplete'):
-				val = attrs.get(attr_name)
-				if val is not None and val != '':
-					elem_info[attr_name] = val
-
-			result['interactive_elements'].append(elem_info)
+		# Get the serialized DOM tree — same representation browser-use's agent sees
+		dom_tree = state.dom_state.llm_representation()
+		parts.append(dom_tree)
 
 		if include_screenshot and state.screenshot:
-			result['screenshot'] = state.screenshot
+			parts.append(f'\nscreenshot: {state.screenshot}')
 
-		return json.dumps(result, indent=2)
+		return '\n'.join(parts)
 
 	async def _get_page_text(self, max_length: int = 5000) -> str:
 		"""Get all visible text on the current page using browser-use's built-in DOM tree serializer.
