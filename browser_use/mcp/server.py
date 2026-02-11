@@ -380,6 +380,24 @@ class BrowserUseServer:
 						'required': ['index', 'text'],
 					},
 				),
+				types.Tool(
+					name='browser_select_combobox',
+					description='Select an option from a combobox/autocomplete dropdown. Use this for custom dropdown inputs (role=combobox, aria-autocomplete=list) like those in Greenhouse ATS forms. Types search text to trigger the dropdown, waits for options to appear, then clicks the matching option. Do NOT use this for native <select> elements (use browser_select_option instead).',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'index': {
+								'type': 'integer',
+								'description': 'The index of the combobox input element (from browser_get_state)',
+							},
+							'text': {
+								'type': 'string',
+								'description': 'The option text to select (case-insensitive partial match). E.g., "No", "Yes", "United States", "Bachelor"',
+							},
+						},
+						'required': ['index', 'text'],
+					},
+				),
 				# Tab management
 				types.Tool(
 					name='browser_list_tabs', description='List all open tabs', inputSchema={'type': 'object', 'properties': {}}
@@ -550,6 +568,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_select_option':
 				return await self._select_option(arguments['index'], arguments['text'])
+
+			elif tool_name == 'browser_select_combobox':
+				return await self._select_combobox(arguments['index'], arguments['text'])
 
 			elif tool_name == 'browser_get_state':
 				return await self._get_browser_state(arguments.get('include_screenshot', False))
@@ -910,7 +931,8 @@ class BrowserUseServer:
 		backend_node_id = element.backend_node_id
 
 		try:
-			cdp_session = await self.browser_session.get_or_create_cdp_session()
+			# Use cdp_client_for_node to handle elements inside iframes
+			cdp_session = await self.browser_session.cdp_client_for_node(element)
 
 			# Resolve the backend node to a remote object
 			resolve_result = await cdp_session.cdp_client.send.DOM.resolveNode(
@@ -972,6 +994,108 @@ class BrowserUseServer:
 
 		except Exception as e:
 			return f'Error selecting option: {str(e)}'
+
+	async def _select_combobox(self, index: int, text: str) -> str:
+		"""Select an option from a combobox/autocomplete dropdown.
+
+		Handles the full TYPE-THEN-CLICK pattern in one call:
+		1. Click the input to focus it
+		2. Clear existing text and type the search term
+		3. Wait for the dropdown to render
+		4. Find the matching option in the DOM
+		5. Click it
+		"""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		element = await self.browser_session.get_dom_element_by_index(index)
+		if not element:
+			return f'Element with index {index} not found'
+
+		import asyncio as _asyncio
+		from browser_use.browser.events import ClickElementEvent, SendKeysEvent, TypeTextEvent
+
+		try:
+			# Step 1: Click to focus the combobox input
+			click_event = self.browser_session.event_bus.dispatch(ClickElementEvent(node=element))
+			await click_event
+			await _asyncio.sleep(0.2)
+
+			# Step 2: Select all existing text and type the search term
+			select_event = self.browser_session.event_bus.dispatch(SendKeysEvent(keys='ctrl+a'))
+			await select_event
+			await _asyncio.sleep(0.1)
+
+			type_event = self.browser_session.event_bus.dispatch(
+				TypeTextEvent(node=element, text=text)
+			)
+			await type_event
+			await _asyncio.sleep(0.5)  # Wait for dropdown to render
+
+			# Step 3: Get fresh DOM state to find dropdown options
+			search_lower = text.lower()
+			best_option = None
+			best_is_exact = False
+
+			# Try up to 3 times with increasing wait to find options
+			for attempt in range(3):
+				selector_map = await self.browser_session.get_selector_map()
+
+				for idx, node in selector_map.items():
+					if idx == index:
+						continue
+					# Look for elements with role=option
+					role = node.attributes.get('role', '') if node.attributes else ''
+					if role != 'option':
+						continue
+
+					# Get the option's visible text
+					option_text = ''
+					if node.text:
+						option_text = node.text.strip()
+					elif node.children_nodes:
+						# Collect text from child nodes
+						texts = []
+						for child in node.children_nodes:
+							if child.text:
+								texts.append(child.text.strip())
+						option_text = ' '.join(texts)
+
+					if not option_text:
+						continue
+
+					opt_lower = option_text.lower()
+
+					# Exact match takes priority
+					if opt_lower == search_lower:
+						best_option = (idx, node, option_text)
+						best_is_exact = True
+						break
+
+					# Partial match (contains)
+					if not best_is_exact and search_lower in opt_lower:
+						best_option = (idx, node, option_text)
+
+				if best_option:
+					break
+
+				# Wait longer and retry
+				await _asyncio.sleep(0.5)
+
+			if not best_option:
+				return f'Error: No dropdown option matching "{text}" found after typing into combobox {index}'
+
+			opt_idx, opt_node, opt_text = best_option
+
+			# Step 4: Click the matching option
+			click_opt = self.browser_session.event_bus.dispatch(ClickElementEvent(node=opt_node))
+			await click_opt
+			await _asyncio.sleep(0.2)
+
+			return f"Selected '{opt_text}' from combobox {index}"
+
+		except Exception as e:
+			return f'Error selecting combobox option: {str(e)}'
 
 	async def _get_browser_state(self, include_screenshot: bool = False) -> str:
 		"""Get current browser state using browser-use's built-in DOM tree serializer.
