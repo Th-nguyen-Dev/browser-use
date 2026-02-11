@@ -316,20 +316,6 @@ class BrowserUseServer:
 					inputSchema={'type': 'object', 'properties': {}},
 				),
 				types.Tool(
-					name='browser_get_text',
-					description='Get all visible text on the current page. Returns the full text content including headings, labels, paragraphs, error messages, and instructions. No AI/LLM required. Useful for reading form labels, validation errors, and page content that browser_get_state does not show.',
-					inputSchema={
-						'type': 'object',
-						'properties': {
-							'max_length': {
-								'type': 'integer',
-								'description': 'Maximum characters to return (default 5000). Use a smaller value for quick checks.',
-								'default': 5000,
-							}
-						},
-					},
-				),
-				types.Tool(
 					name='browser_upload_file',
 					description='Upload a file to a file input element on the page. Click the upload button/area first to identify it, then use this tool with the element index and absolute file path.',
 					inputSchema={
@@ -428,6 +414,24 @@ class BrowserUseServer:
 				# 		"properties": {}
 				# 	}
 				# ),
+				types.Tool(
+					name='browser_execute_js',
+					description='Execute JavaScript on a specific element identified by its index from browser_get_state. The element is available as `this` in the function body. Use this for custom interactions that other tools cannot handle (e.g., clicking Workday custom radio buttons, triggering framework-specific events).',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'index': {
+								'type': 'integer',
+								'description': 'The index of the element (from browser_get_state) to execute JS on. The element is available as `this`.',
+							},
+							'script': {
+								'type': 'string',
+								'description': 'JavaScript function body to execute. The target element is `this`. Example: "this.click(); return this.tagName;"',
+							},
+						},
+						'required': ['index', 'script'],
+					},
+				),
 				types.Tool(
 					name='retry_with_browser_use_agent',
 					description='Retry a task using the browser-use agent. Only use this as a last resort if you fail to interact with a page multiple times.',
@@ -578,9 +582,6 @@ class BrowserUseServer:
 			elif tool_name == 'browser_extract_content':
 				return await self._extract_content(arguments['query'], arguments.get('extract_links', False))
 
-			elif tool_name == 'browser_get_text':
-				return await self._get_page_text(arguments.get('max_length', 5000))
-
 			elif tool_name == 'browser_scroll':
 				return await self._scroll(arguments.get('direction', 'down'))
 
@@ -589,6 +590,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_upload_file':
 				return await self._upload_file(arguments['index'], arguments['path'])
+
+			elif tool_name == 'browser_execute_js':
+				return await self._execute_js(arguments['index'], arguments['script'])
 
 			elif tool_name == 'browser_close':
 				return await self._close_browser()
@@ -995,6 +999,52 @@ class BrowserUseServer:
 		except Exception as e:
 			return f'Error selecting option: {str(e)}'
 
+	async def _execute_js(self, index: int, script: str) -> str:
+		"""Execute JavaScript on a specific element by index.
+		The element is available as `this` in the function body."""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		self._update_session_activity(self.browser_session.id)
+
+		element = await self.browser_session.get_dom_element_by_index(index)
+		if not element:
+			return f'Element with index {index} not found'
+
+		backend_node_id = element.backend_node_id
+
+		try:
+			cdp_session = await self.browser_session.cdp_client_for_node(element)
+
+			resolve_result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+			object_id = resolve_result.get('object', {}).get('objectId')
+			if not object_id:
+				return f'Error: Could not resolve element {index} to a remote object'
+
+			js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'objectId': object_id,
+					'functionDeclaration': f'function() {{ {script} }}',
+					'returnByValue': True,
+				},
+				session_id=cdp_session.session_id,
+			)
+
+			result_value = js_result.get('result', {}).get('value')
+			exception_details = js_result.get('exceptionDetails')
+			if exception_details:
+				return f"JS Error: {exception_details.get('text', str(exception_details))}"
+
+			if result_value is not None:
+				return f'JS result: {result_value}'
+			return f'Executed JS on element {index}'
+
+		except Exception as e:
+			return f'Error executing JS: {str(e)}'
+
 	async def _select_combobox(self, index: int, text: str) -> str:
 		"""Select an option from a combobox/autocomplete dropdown.
 
@@ -1152,24 +1202,6 @@ class BrowserUseServer:
 			parts.append(f'\nscreenshot: {state.screenshot}')
 
 		return '\n'.join(parts)
-
-	async def _get_page_text(self, max_length: int = 5000) -> str:
-		"""Get all visible text on the current page using browser-use's built-in DOM tree serializer.
-		Returns the full text content including headings, labels, paragraphs, error messages, and instructions.
-		No AI/LLM required."""
-		if not self.browser_session:
-			return 'Error: No browser session active'
-
-		try:
-			state = await self.browser_session.get_browser_state_summary()
-			text = state.dom_state.llm_representation()
-			if not text:
-				return 'No visible text found on page'
-			if len(text) > max_length:
-				text = text[:max_length] + f'\n\n... (truncated at {max_length} chars, {len(text)} total)'
-			return text
-		except Exception as e:
-			return f'Error getting page text: {str(e)}'
 
 	async def _extract_content(self, query: str, extract_links: bool = False) -> str:
 		"""Extract content from current page."""
