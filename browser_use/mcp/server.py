@@ -937,82 +937,17 @@ class BrowserUseServer:
 		return json.dumps(result, indent=2)
 
 	async def _get_page_text(self, max_length: int = 5000) -> str:
-		"""Get structured visible text from the current page via CDP. No LLM required.
-		Returns text with hierarchy markers showing headings, form sections, labels, and errors."""
+		"""Get all visible text on the current page using browser-use's built-in DOM tree serializer.
+		Returns the full text content including headings, labels, paragraphs, error messages, and instructions.
+		No AI/LLM required."""
 		if not self.browser_session:
 			return 'Error: No browser session active'
 
 		try:
-			cdp_session = await self.browser_session.get_active_cdp_session()
-			# Walk DOM and output structured text with hierarchy indicators
-			js_code = r"""
-			(() => {
-				const lines = [];
-				const walk = (node, depth) => {
-					if (!node || node.nodeType === 8) return; // skip comments
-					if (node.nodeType === 3) { // text node
-						const t = node.textContent.trim();
-						if (t) lines.push(t);
-						return;
-					}
-					if (node.nodeType !== 1) return; // only element nodes
-					const el = node;
-					const tag = el.tagName.toLowerCase();
-					const style = window.getComputedStyle(el);
-					if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
-
-					// Headings
-					if (/^h[1-6]$/.test(tag)) {
-						const level = tag[1];
-						lines.push('\n' + '#'.repeat(parseInt(level)) + ' ' + el.innerText.trim());
-						return;
-					}
-					// Form sections / fieldsets
-					if (tag === 'fieldset' || tag === 'section') {
-						const legend = el.querySelector('legend, [class*="title"], [class*="header"]');
-						if (legend) lines.push('\n--- ' + legend.innerText.trim() + ' ---');
-					}
-					// Labels
-					if (tag === 'label') {
-						const forId = el.getAttribute('for');
-						const required = el.querySelector('[required]') || el.textContent.includes('*');
-						const text = el.innerText.trim();
-						if (text) {
-							lines.push('[LABEL' + (required ? '*' : '') + '] ' + text);
-						}
-						return;
-					}
-					// Error messages (red text, error classes, aria-invalid related)
-					const classes = el.className || '';
-					const role = el.getAttribute('role');
-					if (role === 'alert' || /error|invalid|warning|validation/i.test(classes)) {
-						const t = el.innerText.trim();
-						if (t) {
-							lines.push('[ERROR] ' + t);
-							return;
-						}
-					}
-					// Skip script/style/svg
-					if (['script','style','svg','noscript','iframe'].includes(tag)) return;
-
-					for (const child of el.childNodes) {
-						walk(child, depth + 1);
-					}
-				};
-				walk(document.body, 0);
-				return lines.filter(l => l.length > 0).join('\n');
-			})()
-			"""
-			result = await cdp_session.cdp_client.send.Runtime.evaluate(
-				expression=js_code,
-				returnByValue=True,
-			)
-			text = result.get('result', {}).get('value', '')
+			state = await self.browser_session.get_browser_state_summary()
+			text = state.dom_state.llm_representation()
 			if not text:
 				return 'No visible text found on page'
-			# Collapse excessive whitespace
-			import re
-			text = re.sub(r'\n{3,}', '\n\n', text)
 			if len(text) > max_length:
 				text = text[:max_length] + f'\n\n... (truncated at {max_length} chars, {len(text)} total)'
 			return text
