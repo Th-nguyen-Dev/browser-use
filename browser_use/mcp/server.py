@@ -648,6 +648,14 @@ class BrowserUseServer:
 		self.browser_session = BrowserSession(browser_profile=profile)
 		await self.browser_session.start()
 
+		# Inject default CSS zoom on every page (25% zoom to fit more content)
+		try:
+			await self.browser_session._cdp_add_init_script(
+				'document.addEventListener("DOMContentLoaded", () => { document.body.style.zoom = "0.25"; });'
+			)
+		except Exception:
+			pass  # Non-critical: zoom is a nice-to-have
+
 		# Track the session for management
 		self._track_session(self.browser_session)
 
