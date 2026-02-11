@@ -362,6 +362,24 @@ class BrowserUseServer:
 						'required': ['index', 'text'],
 					},
 				),
+				types.Tool(
+					name='browser_select_option',
+					description='Select an option from a <select> dropdown by its visible text. Use this for native <select> elements — browser_type does NOT work on selects (it jumps between options per keystroke instead of searching). This tool directly sets the value via JavaScript.',
+					inputSchema={
+						'type': 'object',
+						'properties': {
+							'index': {
+								'type': 'integer',
+								'description': 'The index of the <select> element (from browser_get_state)',
+							},
+							'text': {
+								'type': 'string',
+								'description': 'The visible text of the option to select (case-insensitive partial match). E.g., "United States", "Washington", "Bachelor"',
+							},
+						},
+						'required': ['index', 'text'],
+					},
+				),
 				# Tab management
 				types.Tool(
 					name='browser_list_tabs', description='List all open tabs', inputSchema={'type': 'object', 'properties': {}}
@@ -529,6 +547,9 @@ class BrowserUseServer:
 
 			elif tool_name == 'browser_clear_and_type':
 				return await self._clear_and_type(arguments['index'], arguments['text'])
+
+			elif tool_name == 'browser_select_option':
+				return await self._select_option(arguments['index'], arguments['text'])
 
 			elif tool_name == 'browser_get_state':
 				return await self._get_browser_state(arguments.get('include_screenshot', False))
@@ -876,6 +897,81 @@ class BrowserUseServer:
 		await type_event
 
 		return f"Cleared and typed '{text}' into element {index}"
+
+	async def _select_option(self, index: int, text: str) -> str:
+		"""Select an option from a <select> element by visible text using JavaScript."""
+		if not self.browser_session:
+			return 'Error: No browser session active'
+
+		element = await self.browser_session.get_dom_element_by_index(index)
+		if not element:
+			return f'Element with index {index} not found'
+
+		backend_node_id = element.backend_node_id
+
+		try:
+			cdp_session = await self.browser_session.get_or_create_cdp_session()
+
+			# Resolve the backend node to a remote object
+			resolve_result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+			object_id = resolve_result.get('object', {}).get('objectId')
+			if not object_id:
+				return f'Error: Could not resolve element {index} to a remote object'
+
+			# Run JS on the element: find matching option by text, select it, fire change event
+			js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'objectId': object_id,
+					'functionDeclaration': """
+					function(searchText) {
+						if (this.tagName !== 'SELECT') {
+							return { error: 'Element is not a <select>, it is <' + this.tagName.toLowerCase() + '>' };
+						}
+						var search = searchText.toLowerCase();
+						var bestMatch = null;
+						for (var i = 0; i < this.options.length; i++) {
+							var optText = this.options[i].text.toLowerCase();
+							if (optText === search) {
+								bestMatch = this.options[i];
+								break;
+							}
+							if (!bestMatch && optText.indexOf(search) !== -1) {
+								bestMatch = this.options[i];
+							}
+						}
+						if (!bestMatch) {
+							var available = [];
+							for (var j = 0; j < Math.min(this.options.length, 10); j++) {
+								available.push(this.options[j].text);
+							}
+							return { error: 'No option matching "' + searchText + '". First options: ' + available.join(', ') };
+						}
+						this.value = bestMatch.value;
+						this.dispatchEvent(new Event('input', { bubbles: true }));
+						this.dispatchEvent(new Event('change', { bubbles: true }));
+						return { selected: bestMatch.text, value: bestMatch.value };
+					}
+					""",
+					'arguments': [{'value': text}],
+					'returnByValue': True,
+				},
+				session_id=cdp_session.session_id,
+			)
+
+			result_value = js_result.get('result', {}).get('value', {})
+			if isinstance(result_value, dict):
+				if 'error' in result_value:
+					return f"Error: {result_value['error']}"
+				if 'selected' in result_value:
+					return f"Selected '{result_value['selected']}' (value={result_value['value']}) in element {index}"
+
+			return f'Selected option in element {index}'
+
+		except Exception as e:
+			return f'Error selecting option: {str(e)}'
 
 	async def _get_browser_state(self, include_screenshot: bool = False) -> str:
 		"""Get current browser state using browser-use's built-in DOM tree serializer.
