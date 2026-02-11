@@ -149,7 +149,7 @@ except ImportError:
 	logger.error('MCP SDK not installed. Install with: pip install mcp')
 	sys.exit(1)
 
-from browser_use.browser.events import SendKeysEvent, UploadFileEvent
+from browser_use.browser.events import SendKeysEvent
 from browser_use.telemetry import MCPServerTelemetryEvent, ProductTelemetry
 from browser_use.utils import create_task_with_error_handling, get_browser_use_version
 
@@ -1115,7 +1115,11 @@ class BrowserUseServer:
 		return 'Navigated back'
 
 	async def _upload_file(self, index: int, path: str) -> str:
-		"""Upload a file to a file input element."""
+		"""Upload a file to a file input element using CDP directly.
+
+		Uses cdp_client_for_node() to get the correct CDP session for the element,
+		which properly handles elements inside iframes (e.g., Greenhouse ATS forms).
+		"""
 		if not self.browser_session:
 			return 'Error: No browser session active'
 
@@ -1178,11 +1182,19 @@ class BrowserUseServer:
 			return 'Error: No file upload element found on the page'
 
 		try:
-			event = self.browser_session.event_bus.dispatch(
-				UploadFileEvent(node=file_input_node, file_path=path)
+			# Use cdp_client_for_node to get the correct CDP session for the element's
+			# frame context — this properly handles elements inside iframes
+			cdp_session = await self.browser_session.cdp_client_for_node(file_input_node)
+			backend_node_id = file_input_node.backend_node_id
+
+			await cdp_session.cdp_client.send.DOM.setFileInputFiles(
+				params={
+					'files': [path],
+					'backendNodeId': backend_node_id,
+				},
+				session_id=cdp_session.session_id,
 			)
-			await event
-			await event.event_result(raise_if_any=True, raise_if_none=False)
+
 			return f'Successfully uploaded file {os.path.basename(path)} to element {index}'
 		except Exception as e:
 			return f'Error uploading file: {str(e)}'
