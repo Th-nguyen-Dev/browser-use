@@ -648,14 +648,6 @@ class BrowserUseServer:
 		self.browser_session = BrowserSession(browser_profile=profile)
 		await self.browser_session.start()
 
-		# Inject 25% CSS zoom on every page via CDP
-		try:
-			await self.browser_session._cdp_add_init_script(
-				'document.documentElement.style.zoom = "0.25";'
-			)
-		except Exception:
-			pass  # Non-critical: zoom is a nice-to-have
-
 		# Track the session for management
 		self._track_session(self.browser_session)
 
@@ -798,11 +790,25 @@ class BrowserUseServer:
 		if new_tab:
 			event = self.browser_session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
 			await event
+			await self._apply_page_zoom()
 			return f'Opened new tab with URL: {url}'
 		else:
 			event = self.browser_session.event_bus.dispatch(NavigateToUrlEvent(url=url))
 			await event
+			await self._apply_page_zoom()
 			return f'Navigated to: {url}'
+
+	async def _apply_page_zoom(self) -> None:
+		"""Apply 25% CSS zoom to the current page."""
+		try:
+			if self.browser_session:
+				cdp_session = await self.browser_session.get_or_create_cdp_session()
+				await cdp_session.cdp_client.send.Runtime.evaluate(
+					params={'expression': 'document.documentElement.style.zoom = "0.25"'},
+					session_id=cdp_session.session_id,
+				)
+		except Exception:
+			pass  # Non-critical
 
 	async def _click(self, index: int, new_tab: bool = False) -> str:
 		"""Click an element by index."""
