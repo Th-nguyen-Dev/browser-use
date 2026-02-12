@@ -510,6 +510,15 @@ class DOMTreeSerializer:
 			if not is_visible and is_file_input:
 				is_visible = True  # Force visibility for file inputs
 
+			# EXCEPTION: Radio/checkbox inputs are often hidden with opacity:0 but are still functional
+			# ATS platforms like Ashby use this pattern with custom-styled radio buttons and checkboxes
+			is_hidden_radio_or_checkbox = (
+				node.tag_name and node.tag_name.lower() == 'input'
+				and node.attributes and node.attributes.get('type') in ('radio', 'checkbox')
+			)
+			if not is_visible and is_hidden_radio_or_checkbox:
+				is_visible = True  # Force visibility for radio/checkbox inputs
+
 			# Include if visible, scrollable, has children, or is shadow host
 			if is_visible or is_scrollable or has_shadow_content or is_shadow_host:
 				simplified = SimplifiedNode(original_node=node, children=[], is_shadow_host=is_shadow_host)
@@ -564,12 +573,21 @@ class DOMTreeSerializer:
 			and node.original_node.attributes.get('type') == 'file'
 		)
 
+		# EXCEPTION: Radio/checkbox inputs are often hidden with opacity:0 but are still functional
+		is_hidden_radio_or_checkbox = (
+			node.original_node.tag_name
+			and node.original_node.tag_name.lower() == 'input'
+			and node.original_node.attributes
+			and node.original_node.attributes.get('type') in ('radio', 'checkbox')
+		)
+
 		if (
 			is_visible  # Keep all visible nodes
 			or node.original_node.is_actually_scrollable
 			or node.original_node.node_type == NodeType.TEXT_NODE
 			or node.children
 			or is_file_input  # Keep file inputs even if not visible
+			or is_hidden_radio_or_checkbox  # Keep radio/checkbox inputs even if not visible
 		):
 			return node
 
@@ -658,6 +676,15 @@ class DOMTreeSerializer:
 				and node.original_node.attributes.get('type') == 'file'
 			)
 
+			# EXCEPTION: Radio/checkbox inputs are often hidden with opacity:0 but are still functional
+			# ATS platforms like Ashby use this pattern with custom-styled radio buttons and checkboxes
+			is_hidden_radio_or_checkbox = (
+				node.original_node.tag_name
+				and node.original_node.tag_name.lower() == 'input'
+				and node.original_node.attributes
+				and node.original_node.attributes.get('type') in ('radio', 'checkbox')
+			)
+
 			# EXCEPTION: Shadow DOM form elements may not have snapshot layout data from CDP's
 			# DOMSnapshot.captureSnapshot, but they're still functional/interactive.
 			# This handles login forms, custom web components, etc. inside shadow DOM.
@@ -701,8 +728,8 @@ class DOMTreeSerializer:
 					# Only make scrollable container interactive if it has no interactive descendants
 					if not has_interactive_desc:
 						should_make_interactive = True
-			elif is_interactive_assign and (is_visible or is_file_input or is_shadow_dom_element):
-				# Non-scrollable interactive elements: make interactive if visible (or file input or shadow DOM form element)
+			elif is_interactive_assign and (is_visible or is_file_input or is_hidden_radio_or_checkbox or is_shadow_dom_element):
+				# Non-scrollable interactive elements: make interactive if visible (or file/radio/checkbox input or shadow DOM form element)
 				should_make_interactive = True
 
 			# Add to selector map if element should be interactive
